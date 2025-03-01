@@ -3,14 +3,8 @@ from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
 import torch.nn as nn
-from transformers.models.llama.modeling_llama import (
-    Cache,
-    LlamaAttention,
-    LlamaFlashAttention2,
-    LlamaSdpaAttention,
-    apply_rotary_pos_emb,
-    repeat_kv,
-)
+from transformers.models.llama.modeling_llama import Cache, apply_rotary_pos_emb, repeat_kv
+from transformers.models.llama.modeling_llama import LlamaAttention, LlamaFlashAttention2, LlamaSdpaAttention
 from transformers.utils import logging
 from transformers.utils.versions import require_version
 

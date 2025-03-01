@@ -1,25 +1,22 @@
 #! /bin/bash
-model_name_or_path="/zhaoyuhangT/data/pretrain_model/gm_llm_v2.0_cpt_data_1T/20240418224659-pretrain-gm-llm-v2.0/ckpt_step_22000/hf"
-template="llama2_zh"
+model_name_or_path="~/Qwen/Qwen2.5-3B-Instruct"
+template="Qwen2.5"
 
 work_time=$(date +%Y%m%d%H%M%S)
-model="llama2_7b_zh"
-root="/zhaoyuhangT/data/sft_model/$model"
+model="Qwen2.5"
+root="~/AI-mold/mold"
 output_dir="$root/$work_time"
 
 echo "output_dir: $output_dir"
-
-work_dir=/zhaoyuhangT/develop/LLM_dev/GM-LLM/SFT/LLaMA-Factory-main
-cd $work_dir || exit
 
 array=("coding")
 
 # 遍历数组中的每个元素
 for dataset in "${array[@]}"
 do
-    cache_path="/zhaoyuhangT/data/sft/gm-llm-v2.0/$dataset/cache"
+    cache_path="~/AI-mold/mold/cache"
     echo "cache_path: $cache_path"
-    python $work_dir/src/preprocess_dataset.py \
+    python ~/AI-mold/src/preprocess_dataset.py \
         --stage sft \
         --do_train \
         --model_name_or_path "$model_name_or_path" \
