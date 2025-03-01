@@ -1,6 +1,20 @@
+# Copyright 2025 the LlamaFactory team.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
-from ...extras.logging import get_logger
+from ...extras import logging
 from ...extras.misc import get_current_device
 
 
@@ -10,7 +24,7 @@ if TYPE_CHECKING:
     from ...hparams import ModelArguments
 
 
-logger = get_logger(__name__)
+logger = logging.get_logger(__name__)
 
 
 def _get_unsloth_kwargs(
@@ -25,7 +39,7 @@ def _get_unsloth_kwargs(
         "device_map": {"": get_current_device()},
         "rope_scaling": getattr(config, "rope_scaling", None),
         "fix_tokenizer": False,
-        "trust_remote_code": True,
+        "trust_remote_code": model_args.trust_remote_code,
         "use_gradient_checkpointing": "unsloth",
     }
 
@@ -42,7 +56,7 @@ def load_unsloth_pretrained_model(
     try:
         model, _ = FastLanguageModel.from_pretrained(**unsloth_kwargs)
     except NotImplementedError:
-        logger.warning("Unsloth does not support model type {}.".format(getattr(config, "model_type", None)))
+        logger.warning_rank0("Unsloth does not support model type {}.".format(getattr(config, "model_type", None)))
         model = None
         model_args.use_unsloth = False
 

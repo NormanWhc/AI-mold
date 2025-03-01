@@ -1,7 +1,22 @@
+# Copyright 2025 the LlamaFactory team.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from typing import TYPE_CHECKING, Dict
 
 from ...extras.packages import is_gradio_available
-from ..common import DEFAULT_DATA_DIR, list_datasets
+from ..common import DEFAULT_DATA_DIR
+from ..control import list_datasets
 from .data import create_preview_box
 
 
@@ -28,7 +43,7 @@ def create_eval_tab(engine: "Engine") -> Dict[str, "Component"]:
     elem_dict.update(dict(dataset_dir=dataset_dir, dataset=dataset, **preview_elems))
 
     with gr.Row():
-        cutoff_len = gr.Slider(minimum=4, maximum=65536, value=1024, step=1)
+        cutoff_len = gr.Slider(minimum=4, maximum=131072, value=1024, step=1)
         max_samples = gr.Textbox(value="100000")
         batch_size = gr.Slider(minimum=1, maximum=1024, value=2, step=1)
         predict = gr.Checkbox(value=True)

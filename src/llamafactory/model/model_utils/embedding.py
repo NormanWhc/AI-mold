@@ -1,3 +1,17 @@
+# Copyright 2025 the LlamaFactory team.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import math
 from contextlib import nullcontext
 from typing import TYPE_CHECKING
@@ -5,14 +19,14 @@ from typing import TYPE_CHECKING
 import torch
 from transformers.integrations import is_deepspeed_zero3_enabled
 
-from ...extras.logging import get_logger
+from ...extras import logging
 
 
 if TYPE_CHECKING:
     from transformers import PreTrainedModel, PreTrainedTokenizer
 
 
-logger = get_logger(__name__)
+logger = logging.get_logger(__name__)
 
 
 def _noisy_mean_initialization(embed_weight: "torch.Tensor", num_new_tokens: int) -> None:
@@ -55,4 +69,4 @@ def resize_embedding_layer(model: "PreTrainedModel", tokenizer: "PreTrainedToken
             _noisy_mean_initialization(model.get_input_embeddings().weight.data, num_new_tokens)
             _noisy_mean_initialization(model.get_output_embeddings().weight.data, num_new_tokens)
 
-        logger.info("Resized token embeddings from {} to {}.".format(current_embedding_size, new_embedding_size))
+        logger.info_rank0(f"Resized token embeddings from {current_embedding_size} to {new_embedding_size}.")

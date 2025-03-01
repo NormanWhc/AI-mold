@@ -1,3 +1,17 @@
+# Copyright 2025 the LlamaFactory team.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from typing import TYPE_CHECKING, Dict
 
 from transformers.trainer_utils import SchedulerType
@@ -5,8 +19,8 @@ from transformers.trainer_utils import SchedulerType
 from ...extras.constants import TRAINING_STAGES
 from ...extras.misc import get_device_count
 from ...extras.packages import is_gradio_available
-from ..common import DEFAULT_DATA_DIR, list_checkpoints, list_datasets
-from ..utils import change_stage, list_config_paths, list_output_dirs
+from ..common import DEFAULT_DATA_DIR
+from ..control import change_stage, list_checkpoints, list_config_paths, list_datasets, list_output_dirs
 from .data import create_preview_box
 
 
@@ -25,9 +39,8 @@ def create_train_tab(engine: "Engine") -> Dict[str, "Component"]:
     elem_dict = dict()
 
     with gr.Row():
-        training_stage = gr.Dropdown(
-            choices=list(TRAINING_STAGES.keys()), value=list(TRAINING_STAGES.keys())[0], scale=1
-        )
+        stages = list(TRAINING_STAGES.keys())
+        training_stage = gr.Dropdown(choices=stages, value=stages[0], scale=1)
         dataset_dir = gr.Textbox(value=DEFAULT_DATA_DIR, scale=1)
         dataset = gr.Dropdown(multiselect=True, allow_custom_value=True, scale=4)
         preview_elems = create_preview_box(dataset_dir, dataset)
@@ -40,7 +53,7 @@ def create_train_tab(engine: "Engine") -> Dict[str, "Component"]:
         num_train_epochs = gr.Textbox(value="3.0")
         max_grad_norm = gr.Textbox(value="1.0")
         max_samples = gr.Textbox(value="100000")
-        compute_type = gr.Dropdown(choices=["fp16", "bf16", "fp32", "pure_bf16"], value="fp16")
+        compute_type = gr.Dropdown(choices=["bf16", "fp16", "fp32", "pure_bf16"], value="bf16")
 
     input_elems.update({learning_rate, num_train_epochs, max_grad_norm, max_samples, compute_type})
     elem_dict.update(
@@ -54,7 +67,7 @@ def create_train_tab(engine: "Engine") -> Dict[str, "Component"]:
     )
 
     with gr.Row():
-        cutoff_len = gr.Slider(minimum=4, maximum=65536, value=1024, step=1)
+        cutoff_len = gr.Slider(minimum=4, maximum=131072, value=2048, step=1)
         batch_size = gr.Slider(minimum=1, maximum=1024, value=2, step=1)
         gradient_accumulation_steps = gr.Slider(minimum=1, maximum=1024, value=8, step=1)
         val_size = gr.Slider(minimum=0, maximum=1, value=0, step=0.001)
@@ -77,20 +90,28 @@ def create_train_tab(engine: "Engine") -> Dict[str, "Component"]:
             save_steps = gr.Slider(minimum=10, maximum=5000, value=100, step=10)
             warmup_steps = gr.Slider(minimum=0, maximum=5000, value=0, step=1)
             neftune_alpha = gr.Slider(minimum=0, maximum=10, value=0, step=0.1)
-            optim = gr.Textbox(value="adamw_torch")
+            extra_args = gr.Textbox(value='{"optim": "adamw_torch"}')
 
         with gr.Row():
             with gr.Column():
-                resize_vocab = gr.Checkbox()
                 packing = gr.Checkbox()
+                neat_packing = gr.Checkbox()
 
             with gr.Column():
-                upcast_layernorm = gr.Checkbox()
+                train_on_prompt = gr.Checkbox()
+                mask_history = gr.Checkbox()
+
+            with gr.Column():
+                resize_vocab = gr.Checkbox()
                 use_llama_pro = gr.Checkbox()
 
             with gr.Column():
-                shift_attn = gr.Checkbox()
-                report_to = gr.Checkbox()
+                report_to = gr.Dropdown(
+                    choices=["none", "all", "wandb", "mlflow", "neptune", "tensorboard"],
+                    value=["none"],
+                    allow_custom_value=True,
+                    multiselect=True,
+                )
 
     input_elems.update(
         {
@@ -98,12 +119,13 @@ def create_train_tab(engine: "Engine") -> Dict[str, "Component"]:
             save_steps,
             warmup_steps,
             neftune_alpha,
-            optim,
-            resize_vocab,
+            extra_args,
             packing,
-            upcast_layernorm,
+            neat_packing,
+            train_on_prompt,
+            mask_history,
+            resize_vocab,
             use_llama_pro,
-            shift_attn,
             report_to,
         }
     )
@@ -114,12 +136,13 @@ def create_train_tab(engine: "Engine") -> Dict[str, "Component"]:
             save_steps=save_steps,
             warmup_steps=warmup_steps,
             neftune_alpha=neftune_alpha,
-            optim=optim,
-            resize_vocab=resize_vocab,
+            extra_args=extra_args,
             packing=packing,
-            upcast_layernorm=upcast_layernorm,
+            neat_packing=neat_packing,
+            train_on_prompt=train_on_prompt,
+            mask_history=mask_history,
+            resize_vocab=resize_vocab,
             use_llama_pro=use_llama_pro,
-            shift_attn=shift_attn,
             report_to=report_to,
         )
     )
@@ -149,10 +172,9 @@ def create_train_tab(engine: "Engine") -> Dict[str, "Component"]:
             create_new_adapter = gr.Checkbox()
 
         with gr.Row():
-            with gr.Column(scale=1):
-                use_rslora = gr.Checkbox()
-                use_dora = gr.Checkbox()
-
+            use_rslora = gr.Checkbox()
+            use_dora = gr.Checkbox()
+            use_pissa = gr.Checkbox()
             lora_target = gr.Textbox(scale=2)
             additional_target = gr.Textbox(scale=2)
 
@@ -165,6 +187,7 @@ def create_train_tab(engine: "Engine") -> Dict[str, "Component"]:
             create_new_adapter,
             use_rslora,
             use_dora,
+            use_pissa,
             lora_target,
             additional_target,
         }
@@ -179,6 +202,7 @@ def create_train_tab(engine: "Engine") -> Dict[str, "Component"]:
             create_new_adapter=create_new_adapter,
             use_rslora=use_rslora,
             use_dora=use_dora,
+            use_pissa=use_pissa,
             lora_target=lora_target,
             additional_target=additional_target,
         )
@@ -211,8 +235,8 @@ def create_train_tab(engine: "Engine") -> Dict[str, "Component"]:
         with gr.Row():
             use_galore = gr.Checkbox()
             galore_rank = gr.Slider(minimum=1, maximum=1024, value=16, step=1)
-            galore_update_interval = gr.Slider(minimum=1, maximum=1024, value=200, step=1)
-            galore_scale = gr.Slider(minimum=0, maximum=1, value=0.25, step=0.01)
+            galore_update_interval = gr.Slider(minimum=1, maximum=2048, value=200, step=1)
+            galore_scale = gr.Slider(minimum=0, maximum=100, value=2.0, step=0.1)
             galore_target = gr.Textbox(value="all")
 
     input_elems.update({use_galore, galore_rank, galore_update_interval, galore_scale, galore_target})
@@ -224,6 +248,26 @@ def create_train_tab(engine: "Engine") -> Dict[str, "Component"]:
             galore_update_interval=galore_update_interval,
             galore_scale=galore_scale,
             galore_target=galore_target,
+        )
+    )
+
+    with gr.Accordion(open=False) as apollo_tab:
+        with gr.Row():
+            use_apollo = gr.Checkbox()
+            apollo_rank = gr.Slider(minimum=1, maximum=1024, value=16, step=1)
+            apollo_update_interval = gr.Slider(minimum=1, maximum=2048, value=200, step=1)
+            apollo_scale = gr.Slider(minimum=0, maximum=100, value=32.0, step=0.1)
+            apollo_target = gr.Textbox(value="all")
+
+    input_elems.update({use_apollo, apollo_rank, apollo_update_interval, apollo_scale, apollo_target})
+    elem_dict.update(
+        dict(
+            apollo_tab=apollo_tab,
+            use_apollo=use_apollo,
+            apollo_rank=apollo_rank,
+            apollo_update_interval=apollo_update_interval,
+            apollo_scale=apollo_scale,
+            apollo_target=apollo_target,
         )
     )
 
@@ -244,6 +288,40 @@ def create_train_tab(engine: "Engine") -> Dict[str, "Component"]:
             badam_switch_mode=badam_switch_mode,
             badam_switch_interval=badam_switch_interval,
             badam_update_ratio=badam_update_ratio,
+        )
+    )
+
+    with gr.Accordion(open=False) as swanlab_tab:
+        with gr.Row():
+            use_swanlab = gr.Checkbox()
+            swanlab_project = gr.Textbox(value="llamafactory")
+            swanlab_run_name = gr.Textbox()
+            swanlab_workspace = gr.Textbox()
+            swanlab_api_key = gr.Textbox()
+            swanlab_mode = gr.Dropdown(choices=["cloud", "local"], value="cloud")
+            swanlab_link = gr.Markdown(visible=False, container=True)
+
+    input_elems.update(
+        {
+            use_swanlab,
+            swanlab_project,
+            swanlab_run_name,
+            swanlab_workspace,
+            swanlab_api_key,
+            swanlab_mode,
+            swanlab_link,
+        }
+    )
+    elem_dict.update(
+        dict(
+            swanlab_tab=swanlab_tab,
+            use_swanlab=use_swanlab,
+            swanlab_project=swanlab_project,
+            swanlab_run_name=swanlab_run_name,
+            swanlab_workspace=swanlab_workspace,
+            swanlab_api_key=swanlab_api_key,
+            swanlab_mode=swanlab_mode,
+            swanlab_link=swanlab_link,
         )
     )
 
@@ -276,7 +354,7 @@ def create_train_tab(engine: "Engine") -> Dict[str, "Component"]:
         with gr.Column(scale=1):
             loss_viewer = gr.Plot()
 
-    input_elems.update({output_dir, config_path, device_count, ds_stage, ds_offload})
+    input_elems.update({output_dir, config_path, ds_stage, ds_offload})
     elem_dict.update(
         dict(
             cmd_preview_btn=cmd_preview_btn,
@@ -296,7 +374,7 @@ def create_train_tab(engine: "Engine") -> Dict[str, "Component"]:
             loss_viewer=loss_viewer,
         )
     )
-    output_elems = [output_box, progress_bar, loss_viewer]
+    output_elems = [output_box, progress_bar, loss_viewer, swanlab_link]
 
     cmd_preview_btn.click(engine.runner.preview_train, input_elems, output_elems, concurrency_limit=None)
     start_btn.click(engine.runner.run_train, input_elems, output_elems)

@@ -1,5 +1,21 @@
+# Copyright 2025 the LlamaFactory team.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Optional
+
+from transformers import GenerationConfig
 
 
 @dataclass
@@ -50,11 +66,22 @@ class GeneratingArguments:
         default=None,
         metadata={"help": "Default system message to use in chat completion."},
     )
+    skip_special_tokens: bool = field(
+        default=True,
+        metadata={"help": "Whether or not to remove special tokens in the decoding."},
+    )
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self, obey_generation_config: bool = False) -> Dict[str, Any]:
         args = asdict(self)
         if args.get("max_new_tokens", -1) > 0:
             args.pop("max_length", None)
         else:
             args.pop("max_new_tokens", None)
+
+        if obey_generation_config:
+            generation_config = GenerationConfig()
+            for key in list(args.keys()):
+                if not hasattr(generation_config, key):
+                    args.pop(key)
+
         return args

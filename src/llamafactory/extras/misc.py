@@ -1,13 +1,30 @@
+# Copyright 2024 HuggingFace Inc. and the LlamaFactory team.
+#
+# This code is inspired by the HuggingFace's PEFT library.
+# https://github.com/huggingface/peft/blob/v0.10.0/src/peft/peft_model.py
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import gc
 import os
-from typing import TYPE_CHECKING, Dict, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Literal, Sequence, Tuple, Union
 
 import torch
-from peft import PeftModel
-from transformers import InfNanRemoveLogitsProcessor, LogitsProcessorList, PreTrainedModel
+import torch.distributed as dist
+import transformers.dynamic_module_utils
+from transformers import InfNanRemoveLogitsProcessor, LogitsProcessorList
+from transformers.dynamic_module_utils import get_relative_imports
 from transformers.utils import (
-    SAFE_WEIGHTS_NAME,
-    WEIGHTS_NAME,
     is_torch_bf16_gpu_available,
     is_torch_cuda_available,
     is_torch_mps_available,
@@ -16,24 +33,24 @@ from transformers.utils import (
 )
 from transformers.utils.versions import require_version
 
-from .constants import V_HEAD_SAFE_WEIGHTS_NAME, V_HEAD_WEIGHTS_NAME
-from .logging import get_logger
+from . import logging
+from .packages import is_transformers_version_greater_than
 
 
 _is_fp16_available = is_torch_npu_available() or is_torch_cuda_available()
 try:
-    _is_bf16_available = is_torch_bf16_gpu_available()
+    _is_bf16_available = is_torch_bf16_gpu_available() or (is_torch_npu_available() and torch.npu.is_bf16_supported())
 except Exception:
     _is_bf16_available = False
 
 
 if TYPE_CHECKING:
-    from trl import AutoModelForCausalLMWithValueHead
+    from numpy.typing import NDArray
 
     from ..hparams import ModelArguments
 
 
-logger = get_logger(__name__)
+logger = logging.get_logger(__name__)
 
 
 class AverageMeter:
@@ -57,18 +74,51 @@ class AverageMeter:
         self.avg = self.sum / self.count
 
 
-def check_dependencies() -> None:
-    if os.environ.get("DISABLE_VERSION_CHECK", "0").lower() in ["true", "1"]:
-        logger.warning("Version checking has been disabled, may lead to unexpected behaviors.")
+def check_version(requirement: str, mandatory: bool = False) -> None:
+    r"""
+    Optionally checks the package version.
+    """
+    if is_env_enabled("DISABLE_VERSION_CHECK") and not mandatory:
+        logger.warning_rank0_once("Version checking has been disabled, may lead to unexpected behaviors.")
+        return
+
+    if mandatory:
+        hint = f"To fix: run `pip install {requirement}`."
     else:
-        require_version("transformers>=4.41.2", "To fix: pip install transformers>=4.41.2")
-        require_version("datasets>=2.16.0", "To fix: pip install datasets>=2.16.0")
-        require_version("accelerate>=0.30.1", "To fix: pip install accelerate>=0.30.1")
-        require_version("peft>=0.11.1", "To fix: pip install peft>=0.11.1")
-        require_version("trl>=0.8.6", "To fix: pip install trl>=0.8.6")
+        hint = f"To fix: run `pip install {requirement}` or set `DISABLE_VERSION_CHECK=1` to skip this check."
+
+    require_version(requirement, hint)
 
 
-def count_parameters(model: torch.nn.Module) -> Tuple[int, int]:
+def check_dependencies() -> None:
+    r"""
+    Checks the version of the required packages.
+    """
+    check_version("transformers>=4.41.2,<=4.49.0,!=4.46.0,!=4.46.1,!=4.46.2,!=4.46.3,!=4.47.0,!=4.47.1,!=4.48.0")
+    check_version("datasets>=2.16.0,<=3.2.0")
+    check_version("accelerate>=0.34.0,<=1.2.1")
+    check_version("peft>=0.11.1,<=0.12.0")
+    check_version("trl>=0.8.6,<=0.9.6")
+    if is_transformers_version_greater_than("4.46.0") and not is_transformers_version_greater_than("4.48.1"):
+        logger.warning_rank0_once("There are known bugs in transformers v4.46.0-v4.48.0, please use other versions.")
+
+
+def calculate_tps(dataset: Sequence[Dict[str, Any]], metrics: Dict[str, float], stage: Literal["sft", "rm"]) -> float:
+    r"""
+    Calculates effective tokens per second.
+    """
+    effective_token_num = 0
+    for data in dataset:
+        if stage == "sft":
+            effective_token_num += len(data["input_ids"])
+        elif stage == "rm":
+            effective_token_num += len(data["chosen_input_ids"]) + len(data["rejected_input_ids"])
+
+    result = effective_token_num * metrics["epoch"] / metrics["train_runtime"]
+    return result / dist.get_world_size() if dist.is_initialized() else result
+
+
+def count_parameters(model: "torch.nn.Module") -> Tuple[int, int]:
     r"""
     Returns the number of trainable parameters and number of all parameters in the model.
     """
@@ -79,7 +129,7 @@ def count_parameters(model: torch.nn.Module) -> Tuple[int, int]:
         if num_params == 0 and hasattr(param, "ds_numel"):
             num_params = param.ds_numel
 
-        # Due to the design of 4bit linear layers from bitsandbytes, multiply the number of parameters by 2
+        # Due to the design of 4bit linear layers from bitsandbytes, multiply the number of parameters by itemsize
         if param.__class__.__name__ == "Params4bit":
             if hasattr(param, "quant_storage") and hasattr(param.quant_storage, "itemsize"):
                 num_bytes = param.quant_storage.itemsize
@@ -97,55 +147,7 @@ def count_parameters(model: torch.nn.Module) -> Tuple[int, int]:
     return trainable_params, all_param
 
 
-def fix_valuehead_checkpoint(
-    model: "AutoModelForCausalLMWithValueHead", output_dir: str, safe_serialization: bool
-) -> None:
-    r"""
-    The model is already unwrapped.
-
-    There are three cases:
-    1. full tuning without ds_zero3: state_dict = {"model.layers.*": ..., "v_head.summary.*": ...}
-    2. lora tuning without ds_zero3: state_dict = {"v_head.summary.*": ...}
-    3. under deepspeed zero3: state_dict = {"pretrained_model.model.layers.*": ..., "v_head.summary.*": ...}
-
-    We assume `stage3_gather_16bit_weights_on_model_save=true`.
-    """
-    if not isinstance(model.pretrained_model, (PreTrainedModel, PeftModel)):
-        return
-
-    if safe_serialization:
-        from safetensors import safe_open
-        from safetensors.torch import save_file
-
-        path_to_checkpoint = os.path.join(output_dir, SAFE_WEIGHTS_NAME)
-        with safe_open(path_to_checkpoint, framework="pt", device="cpu") as f:
-            state_dict: Dict[str, torch.Tensor] = {key: f.get_tensor(key) for key in f.keys()}
-    else:
-        path_to_checkpoint = os.path.join(output_dir, WEIGHTS_NAME)
-        state_dict: Dict[str, torch.Tensor] = torch.load(path_to_checkpoint, map_location="cpu")
-
-    decoder_state_dict = {}
-    v_head_state_dict = {}
-    for name, param in state_dict.items():
-        if name.startswith("v_head."):
-            v_head_state_dict[name] = param
-        else:
-            decoder_state_dict[name.replace("pretrained_model.", "")] = param
-
-    os.remove(path_to_checkpoint)
-    model.pretrained_model.save_pretrained(
-        output_dir, state_dict=decoder_state_dict or None, safe_serialization=safe_serialization
-    )
-
-    if safe_serialization:
-        save_file(v_head_state_dict, os.path.join(output_dir, V_HEAD_SAFE_WEIGHTS_NAME), metadata={"format": "pt"})
-    else:
-        torch.save(v_head_state_dict, os.path.join(output_dir, V_HEAD_WEIGHTS_NAME))
-
-    logger.info("Value head model saved at: {}".format(output_dir))
-
-
-def get_current_device() -> torch.device:
+def get_current_device() -> "torch.device":
     r"""
     Gets the current available device.
     """
@@ -167,7 +169,9 @@ def get_device_count() -> int:
     r"""
     Gets the number of available GPU or NPU devices.
     """
-    if is_torch_npu_available():
+    if is_torch_xpu_available():
+        return torch.xpu.device_count()
+    elif is_torch_npu_available():
         return torch.npu.device_count()
     elif is_torch_cuda_available():
         return torch.cuda.device_count()
@@ -184,7 +188,26 @@ def get_logits_processor() -> "LogitsProcessorList":
     return logits_processor
 
 
-def infer_optim_dtype(model_dtype: torch.dtype) -> torch.dtype:
+def get_peak_memory() -> Tuple[int, int]:
+    r"""
+    Gets the peak memory usage for the current device (in Bytes).
+    """
+    if is_torch_npu_available():
+        return torch.npu.max_memory_allocated(), torch.npu.max_memory_reserved()
+    elif is_torch_cuda_available():
+        return torch.cuda.max_memory_allocated(), torch.cuda.max_memory_reserved()
+    else:
+        return 0, 0
+
+
+def has_tokenized_data(path: "os.PathLike") -> bool:
+    r"""
+    Checks if the path has a tokenized dataset.
+    """
+    return os.path.isdir(path) and len(os.listdir(path)) > 0
+
+
+def infer_optim_dtype(model_dtype: "torch.dtype") -> "torch.dtype":
     r"""
     Infers the optimal dtype according to the model_dtype and device compatibility.
     """
@@ -203,11 +226,33 @@ def is_gpu_or_npu_available() -> bool:
     return is_torch_npu_available() or is_torch_cuda_available()
 
 
-def has_tokenized_data(path: os.PathLike) -> bool:
+def is_env_enabled(env_var: str, default: str = "0") -> bool:
     r"""
-    Checks if the path has a tokenized dataset.
+    Checks if the environment variable is enabled.
     """
-    return os.path.isdir(path) and len(os.listdir(path)) > 0
+    return os.getenv(env_var, default).lower() in ["true", "y", "1"]
+
+
+def numpify(inputs: Union["NDArray", "torch.Tensor"]) -> "NDArray":
+    r"""
+    Casts a torch tensor or a numpy array to a numpy array.
+    """
+    if isinstance(inputs, torch.Tensor):
+        inputs = inputs.cpu()
+        if inputs.dtype == torch.bfloat16:  # numpy does not support bfloat16 until 1.21.4
+            inputs = inputs.to(torch.float32)
+
+        inputs = inputs.numpy()
+
+    return inputs
+
+
+def skip_check_imports() -> None:
+    r"""
+    Avoids flash attention import error in custom model files.
+    """
+    if not is_env_enabled("FORCE_CHECK_IMPORTS"):
+        transformers.dynamic_module_utils.check_imports = get_relative_imports
 
 
 def torch_gc() -> None:
@@ -225,18 +270,39 @@ def torch_gc() -> None:
         torch.cuda.empty_cache()
 
 
-def try_download_model_from_ms(model_args: "ModelArguments") -> str:
-    if not use_modelscope() or os.path.exists(model_args.model_name_or_path):
+def try_download_model_from_other_hub(model_args: "ModelArguments") -> str:
+    if (not use_modelscope() and not use_openmind()) or os.path.exists(model_args.model_name_or_path):
         return model_args.model_name_or_path
 
-    try:
-        from modelscope import snapshot_download
+    if use_modelscope():
+        check_version("modelscope>=1.11.0", mandatory=True)
+        from modelscope import snapshot_download  # type: ignore
 
         revision = "master" if model_args.model_revision == "main" else model_args.model_revision
-        return snapshot_download(model_args.model_name_or_path, revision=revision, cache_dir=model_args.cache_dir)
-    except ImportError:
-        raise ImportError("Please install modelscope via `pip install modelscope -U`")
+        return snapshot_download(
+            model_args.model_name_or_path,
+            revision=revision,
+            cache_dir=model_args.cache_dir,
+        )
+
+    if use_openmind():
+        check_version("openmind>=0.8.0", mandatory=True)
+        from openmind.utils.hub import snapshot_download  # type: ignore
+
+        return snapshot_download(
+            model_args.model_name_or_path,
+            revision=model_args.model_revision,
+            cache_dir=model_args.cache_dir,
+        )
 
 
 def use_modelscope() -> bool:
-    return os.environ.get("USE_MODELSCOPE_HUB", "0").lower() in ["true", "1"]
+    return is_env_enabled("USE_MODELSCOPE_HUB")
+
+
+def use_openmind() -> bool:
+    return is_env_enabled("USE_OPENMIND_HUB")
+
+
+def use_ray() -> bool:
+    return is_env_enabled("USE_RAY")
